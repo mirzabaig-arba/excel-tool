@@ -48,8 +48,8 @@ LANG = {
         "error_detail": "Visa detaljerat fel",
         "phone_col": "Telefonnummer",
         "lang_label": "Språk / Language",
-        "engine_info": "⚡ Motor: Tesseract OCR (ultralätt, inga minnesproblem)",
-        "sources_info": "📞 Källor: merinfo.se, hitta.se, eniro.se",
+        "engine_info": "⚡ Motor: EasyOCR (intelligent bildanalys)",
+        "sources_info": "📞 Källor: Hitta.se (med automatisk fallback)",
     },
     "en": {
         "title": "🇸🇪 Shareholder Phone Finder",
@@ -78,8 +78,8 @@ LANG = {
         "error_detail": "Show detailed error",
         "phone_col": "Phone Number",
         "lang_label": "Språk / Language",
-        "engine_info": "⚡ Engine: Tesseract OCR (ultra-light, no memory issues)",
-        "sources_info": "📞 Sources: merinfo.se, hitta.se, eniro.se",
+        "engine_info": "⚡ Engine: EasyOCR (intelligent image analysis)",
+        "sources_info": "📞 Sources: Hitta.se (with automatic fallback)",
     }
 }
 
@@ -92,17 +92,16 @@ lang_choice = st.sidebar.selectbox(
 lang_key = "sv" if lang_choice == "Svenska" else "en"
 t = LANG[lang_key]
 
+st.sidebar.markdown("---")
+st.sidebar.markdown(t["engine_info"])
+st.sidebar.markdown(t["sources_info"])
+
 # ============================================================
 # Sidhuvud
 # ============================================================
 st.title(t["title"])
 st.caption(t["subtitle"])
 st.markdown(t["instructions"])
-
-# Visa motorinformation
-st.sidebar.markdown("---")
-st.sidebar.info(t["engine_info"])
-st.sidebar.info(t["sources_info"])
 
 # ============================================================
 # Initiera verktyg med caching

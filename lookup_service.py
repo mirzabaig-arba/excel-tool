@@ -8,7 +8,7 @@ import urllib.parse
 class LookupService:
     """
     Söktjänst för telefonnummer via svenska offentliga kataloger.
-    Fallback: merinfo.se -> hitta.se -> eniro.se
+    Använder hitta.se som primär källa då den har bäst tillgänglighet utan blockeringar.
     """
     
     def __init__(self):
@@ -21,113 +21,112 @@ class LookupService:
             "Connection": "keep-alive",
         }
 
-    def _format_pid(self, person_id):
-        """Formaterar personnummer till 12-siffrigt (YYYYMMDDXXXX)."""
-        pid = re.sub(r'[^0-9]', '', str(person_id).strip())
-        if not pid or len(pid) < 10:
+    def _normalize_name(self, name):
+        """Om namnet är i formatet 'Efternamn, Förnamn', vänd på det."""
+        name = name.strip()
+        if "," in name:
+            parts = [p.strip() for p in name.split(",")]
+            if len(parts) >= 2:
+                return f"{parts[1]} {parts[0]}"
+        return name
+
+    def _clean_phone(self, phone_str):
+        """Rensar och formaterar telefonnummer till snygg svensk standard."""
+        p = re.sub(r'[^0-9]', '', phone_str)
+        if p.startswith('0046'):
+            p = '0' + p[4:]
+        elif p.startswith('46') and not p.startswith('0'):
+            p = '0' + p[2:]
+            
+        if not p.startswith('0'):
             return None
-        if len(pid) == 10:
-            year = int(pid[:2])
-            prefix = "20" if year < 25 else "19"
-            pid = prefix + pid
-        return pid
+            
+        if len(p) < 9 or len(p) > 11:
+            return None
+            
+        # Formatera mobil: 07X-XXX XX XX
+        if p.startswith('07') and len(p) == 10:
+            return f"{p[:3]}-{p[3:6]} {p[6:8]} {p[8:]}"
+        elif p.startswith('07') and len(p) == 9:
+            return f"{p[:3]}-{p[3:5]} {p[5:7]} {p[7:]}"
+            
+        # Formatera fasta telefonnummer (t.ex. Stockholm, Göteborg, Malmö)
+        if p.startswith('08') and len(p) == 9:
+            return f"{p[:2]}-{p[2:5]} {p[5:7]} {p[7:]}"
+        elif p.startswith('031') and len(p) == 9:
+            return f"{p[:3]}-{p[3:6]} {p[6:8]} {p[8:]}"
+        elif p.startswith('040') and len(p) == 9:
+            return f"{p[:3]}-{p[3:6]} {p[6:8]} {p[8:]}"
+            
+        # Standard fallback för andra riktnummer
+        if len(p) == 9:
+            return f"{p[:3]}-{p[3:6]} {p[6:8]} {p[8:]}"
+        elif len(p) == 10:
+            return f"{p[:4]}-{p[4:7]} {p[7:]}"
+            
+        return phone_str
 
-    def _extract_phones(self, soup):
-        """Extraherar telefonnummer från en BeautifulSoup-sida."""
-        phone_links = soup.select('a[href^="tel:"]')
-        phones = []
-        for a in phone_links:
-            p = a['href'].replace("tel:", "").strip()
-            p = re.sub(r'[^0-9+\- ]', '', p)
-            if p and p not in phones and len(p) >= 7:
-                phones.append(p)
-        return ", ".join(phones[:3]) if phones else None
-
-    def _search_merinfo(self, search_val, name):
-        """Söker på merinfo.se."""
+    def _search_hitta(self, name):
+        """Söker efter telefonnummer på Hitta.se."""
         try:
-            url = f"https://www.merinfo.se/search?q={search_val}&d=p"
-            resp = self.session.get(url, headers=self.headers, timeout=15)
+            search_name = self._normalize_name(name)
+            q_enc = urllib.parse.quote(search_name)
+            url = f"https://www.hitta.se/sök?vad={q_enc}"
+            
+            resp = self.session.get(url, headers=self.headers, timeout=12)
             if resp.status_code != 200:
                 return None
+                
             soup = BeautifulSoup(resp.content, "html.parser")
             
-            # Sök profillänk
-            links = soup.select('a[href*="/person/"]')
-            if not links:
-                name_enc = urllib.parse.quote(name)
-                url = f"https://www.merinfo.se/search?q={name_enc}&d=p"
-                resp = self.session.get(url, headers=self.headers, timeout=15)
-                soup = BeautifulSoup(resp.content, "html.parser")
-                links = soup.select('a[href*="/person/"]')
+            # Sök efter nummer direkt i sökresultatet
+            text = soup.get_text()
+            phones = re.findall(r'07\d[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}|0\d[\s-]?\d{2}[\s-]?\d{2}[\s-]?\d{2,3}', text)
+            valid_phones = []
+            for p in phones:
+                cp = self._clean_phone(p)
+                if cp and cp not in valid_phones:
+                    valid_phones.append(cp)
             
+            if valid_phones:
+                return ", ".join(valid_phones[:2])
+                
+            # Om inget direktnummer hittas, gå till första personprofilen
+            links = [l.get('href') for l in soup.select('a[href*="/person/"]') if l.get('href')]
             if links:
-                time.sleep(random.uniform(0.5, 1.2))
-                href = links[0].get('href', '')
-                if not href.startswith('http'):
-                    href = "https://www.merinfo.se" + href
-                resp = self.session.get(href, headers=self.headers, timeout=15)
-                return self._extract_phones(BeautifulSoup(resp.content, "html.parser"))
-            return None
-        except Exception:
-            return None
-
-    def _search_hitta(self, search_val, name):
-        """Söker på hitta.se."""
-        try:
-            q = urllib.parse.quote(name) if name.strip() else search_val
-            url = f"https://www.hitta.se/sök?vad={q}"
-            resp = self.session.get(url, headers=self.headers, timeout=15)
-            if resp.status_code != 200:
-                return None
-            soup = BeautifulSoup(resp.content, "html.parser")
-            
-            result = self._extract_phones(soup)
-            if result:
-                return result
-            
-            links = soup.select('a[href*="/person/"]')
-            if links:
-                time.sleep(random.uniform(0.5, 1.2))
-                href = links[0].get('href', '')
+                href = links[0]
                 if not href.startswith('http'):
                     href = "https://www.hitta.se" + href
-                resp = self.session.get(href, headers=self.headers, timeout=15)
-                return self._extract_phones(BeautifulSoup(resp.content, "html.parser"))
+                
+                time.sleep(random.uniform(0.5, 1.0))
+                p_resp = self.session.get(href, headers=self.headers, timeout=12)
+                if p_resp.status_code == 200:
+                    p_soup = BeautifulSoup(p_resp.content, "html.parser")
+                    p_text = p_soup.get_text()
+                    p_phones = re.findall(r'07\d[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}|0\d[\s-]?\d{2}[\s-]?\d{2}[\s-]?\d{2,3}', p_text)
+                    p_valid = []
+                    for p in p_phones:
+                        cp = self._clean_phone(p)
+                        if cp and cp not in p_valid:
+                            p_valid.append(cp)
+                    if p_valid:
+                        return ", ".join(p_valid[:2])
             return None
-        except Exception:
-            return None
-
-    def _search_eniro(self, search_val, name):
-        """Söker på eniro.se."""
-        try:
-            name_enc = urllib.parse.quote(name)
-            url = f"https://www.eniro.se/persons/{name_enc}"
-            resp = self.session.get(url, headers=self.headers, timeout=15)
-            if resp.status_code != 200:
-                return None
-            return self._extract_phones(BeautifulSoup(resp.content, "html.parser"))
         except Exception:
             return None
 
     def find_phone_number(self, person_id, name):
-        """
-        Hittar telefonnummer med fallback: merinfo -> hitta -> eniro.
-        """
-        formatted = self._format_pid(person_id)
-        if not formatted and not name.strip():
-            return "Inget ID hittat"
-        
-        search_val = formatted or ""
+        """Hittar telefonnummer till en person."""
+        # Rensa och validera namnet
         name_clean = name.strip()
+        if not name_clean:
+            return "Ej hittat"
+            
+        time.sleep(random.uniform(0.3, 0.6))
         
-        time.sleep(random.uniform(0.3, 0.8))
-        
-        # Försök varje källa i ordning
-        for searcher in [self._search_merinfo, self._search_hitta, self._search_eniro]:
-            result = searcher(search_val, name_clean)
-            if result:
-                return result
-            time.sleep(random.uniform(0.5, 1.0))
-        
+        # Sök på hitta.se
+        result = self._search_hitta(name_clean)
+        if result:
+            return result
+            
         return "Ej hittat"
