@@ -1,9 +1,0 @@
-streamlit
-pytesseract
-pandas
-beautifulsoup4
-requests
-openpyxl
-opencv-python-headless
-numpy
-pillow
