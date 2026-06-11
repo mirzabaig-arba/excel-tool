@@ -2,7 +2,6 @@ import pytesseract
 import pandas as pd
 import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance
-import cv2
 import re
 import os
 
@@ -23,35 +22,51 @@ class OCRProcessor:
 
     def _preprocess_image(self, pil_image):
         """
-        Förbehandlar bilden för bättre OCR-resultat.
-        Steg: Gråskala → Kontrast → Skärpa → Binarisering (Otsu)
+        Förbehandlar bilden för bättre OCR-resultat utan att använda OpenCV.
+        Steg: Gråskala → Uppskalning → Kontrastökning → Skärpa/Blur → Binarisering (Otsu)
         """
-        # Konvertera till OpenCV-format
-        img_np = np.array(pil_image)
-        
         # 1. Konvertera till gråskala
-        if len(img_np.shape) == 3:
-            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = img_np
+        gray = pil_image.convert("L")
         
         # 2. Skala upp om bilden är liten (Tesseract fungerar bäst med ~300 DPI)
-        h, w = gray.shape
+        w, h = gray.size
         if w < 1500:
             scale = 1500 / w
-            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            gray = gray.resize((new_w, new_h), Image.Resampling.LANCZOS)
         
-        # 3. Öka kontrasten med CLAHE (adaptiv histogram-utjämning)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        gray = clahe.apply(gray)
+        # 3. Öka kontrasten med ImageEnhance
+        enhancer = ImageEnhance.Contrast(gray)
+        gray = enhancer.enhance(2.0)
         
-        # 4. Lätt gaussisk oskärpa för att minska brus
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        # 4. Lätt Gaussian Blur för att ta bort brus
+        gray = gray.filter(ImageFilter.GaussianBlur(radius=0.5))
         
-        # 5. Otsu-tröskling (automatisk binarisering)
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # 5. Binarisering med Otsu's tröskelmetod i numpy
+        img_np = np.array(gray)
+        hist, bin_edges = np.histogram(img_np, bins=256, range=(0, 256))
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
         
-        return Image.fromarray(binary)
+        weight1 = np.cumsum(hist)
+        weight2 = np.cumsum(hist[::-1])[::-1]
+        
+        # Undvik division med noll
+        weight1 = np.maximum(weight1, 1)
+        weight2 = np.maximum(weight2, 1)
+        
+        mean1 = np.cumsum(hist * bin_centers) / weight1
+        mean2 = (np.cumsum((hist * bin_centers)[::-1]) / weight2[::-1])[::-1]
+        
+        variance12 = weight1[:-1] * weight2[1:] * (mean1[:-1] - mean2[1:]) ** 2
+        
+        if len(variance12) > 0:
+            threshold = bin_centers[:-1][np.argmax(variance12)]
+        else:
+            threshold = 127
+            
+        binary_np = np.where(img_np > threshold, 255, 0).astype(np.uint8)
+        return Image.fromarray(binary_np)
 
     def process_image(self, pil_image):
         """
