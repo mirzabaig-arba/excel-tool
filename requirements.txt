@@ -1,5 +1,5 @@
 streamlit
-easyocr
+pytesseract
 pandas
 beautifulsoup4
 requests
