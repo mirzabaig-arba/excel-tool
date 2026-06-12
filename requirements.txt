@@ -1,5 +1,6 @@
 streamlit
 easyocr
+certifi
 pandas
 beautifulsoup4
 requests

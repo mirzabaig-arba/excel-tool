@@ -43,8 +43,21 @@ class OCRProcessor:
 
     def _get_reader(self):
         if self._reader is None:
+            from ssl_fix import ensure_ssl_for_downloads
+
+            ensure_ssl_for_downloads(allow_insecure_fallback=True)
             import easyocr
-            self._reader = easyocr.Reader(["sv", "en"], gpu=False)
+
+            try:
+                self._reader = easyocr.Reader(["sv", "en"], gpu=False)
+            except Exception as exc:
+                err = str(exc)
+                if "SSL" in err or "CERTIFICATE" in err:
+                    raise RuntimeError(
+                        "EasyOCR kunde inte ladda OCR-modeller (SSL-certifikatfel). "
+                        "Kor Setup_Local.bat igen eller kor: python download_ocr_models.py"
+                    ) from exc
+                raise
         return self._reader
 
     def _fix_orientation(self, pil_image):
