@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from ocr_processor import OCRProcessor
 from lookup_service import LookupService
 from PIL import Image
@@ -8,8 +7,10 @@ import io
 import traceback
 import gc
 import warnings
+import logging
 
 warnings.filterwarnings("ignore", message=".*pin_memory.*")
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
 MAX_IMAGES = 5
 
@@ -110,7 +111,11 @@ if "preview_idx" not in st.session_state:
 
 @st.cache_resource
 def load_tools():
-    return OCRProcessor(), LookupService()
+    ocr = OCRProcessor()
+    lookup = LookupService()
+    with st.spinner("Laddar OCR-modell (engångs, tar ~30 sek)..."):
+        ocr._get_reader()
+    return ocr, lookup
 
 
 @st.dialog("Förhandsvisning", width="large")
@@ -213,30 +218,21 @@ if not show_results and files:
                 gc.collect()
 
                 total = len(df)
-                status.info(
-                    f"Hittade {total} personer. Söker via Hitta.se och Merinfo.se..."
-                )
-                phones = [None] * total
                 rows = list(df.iterrows())
-
-                def lookup_row(item):
-                    idx, row = item
-                    return idx, lookup.find_phone_number(
+                status.info(
+                    f"Hittade {total} personer. Söker telefonnummer (Hitta.se, sedan Merinfo)..."
+                )
+                phones = []
+                for n, (_, row) in enumerate(rows):
+                    phone = lookup.find_phone_number(
                         str(row.get("Pers/Org nr", "")),
                         str(row.get("Namn, Postadress", "")),
                     )
-
-                completed = 0
-                with ThreadPoolExecutor(max_workers=8) as pool:
-                    futures = [pool.submit(lookup_row, item) for item in rows]
-                    for future in as_completed(futures):
-                        idx, phone = future.result()
-                        phones[idx] = phone
-                        completed += 1
-                        progress.progress(
-                            (len(names) + 1 + completed) / (len(names) + 2 + total),
-                            text=f"Telefonnummer {completed} av {total}",
-                        )
+                    phones.append(phone)
+                    progress.progress(
+                        (len(names) + 1 + n + 1) / (len(names) + 2 + total),
+                        text=f"Telefonnummer {n + 1} av {total}",
+                    )
 
                 df["Telefonnummer"] = phones
                 st.session_state.results_df = df

@@ -1,15 +1,13 @@
 import re
 import urllib.parse
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 
 
 class LookupService:
     """
-    Phone lookup optimized for accuracy and speed.
-    Sweden: hitta.se + merinfo.se + eniro.se in parallel.
-    Denmark: krak.dk only when the address is clearly Danish.
+    Phone lookup via hitta.se and merinfo.se only.
+    Tries hitta first (fastest), falls back to merinfo if needed.
     """
 
     def __init__(self):
@@ -21,7 +19,7 @@ class LookupService:
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "sv-SE,sv;q=0.9,da;q=0.8,en;q=0.7",
+            "Accept-Language": "sv-SE,sv;q=0.9,en;q=0.7",
         }
         self._cache = {}
 
@@ -160,45 +158,27 @@ class LookupService:
             return f"{digits[:4]}-{digits[4:7]} {digits[7:]}"
         return None
 
-    def _format_danish_phone(self, digits):
-        if digits.startswith("0045"):
-            digits = digits[4:]
-        elif digits.startswith("45") and len(digits) > 8:
-            digits = digits[2:]
-        if len(digits) == 8:
-            return f"{digits[:2]} {digits[2:4]} {digits[4:6]} {digits[6:]}"
-        return None
-
-    def _add_phone(self, phones, digits, person_id="", country="se"):
-        if country == "dk":
-            formatted = self._format_danish_phone(digits)
-        else:
-            if not self._is_plausible_swedish_phone(digits, person_id):
-                return
-            formatted = self._format_swedish_phone(digits)
+    def _add_phone(self, phones, digits, person_id=""):
+        if not self._is_plausible_swedish_phone(digits, person_id):
+            return
+        formatted = self._format_swedish_phone(digits)
         if formatted and formatted not in phones:
             phones.append(formatted)
 
-    def _extract_phones_from_html(self, html, person_id="", country="se"):
+    def _extract_phones_from_html(self, html, person_id=""):
         phones = []
         soup = BeautifulSoup(html, "html.parser")
 
         for link in soup.select('a[href^="tel:"]'):
-            self._add_phone(phones, self._digits_only(link.get("href", "")), person_id, country)
+            self._add_phone(phones, self._digits_only(link.get("href", "")), person_id)
 
         visible = soup.get_text(" ", strip=True)
-        if country == "dk":
-            for match in re.findall(
-                r"(?:\+45\s?)?\d{2}[\s-]?\d{2}[\s-]?\d{2}[\s-]?\d{2}", visible
-            ):
-                self._add_phone(phones, self._digits_only(match), person_id, country)
-        else:
-            for match in re.findall(r"07\d-\d{3}\s\d{2}\s\d{2}", visible):
-                self._add_phone(phones, self._digits_only(match), person_id, country)
-            for match in re.findall(r"\b07\d{8}\b", visible):
-                self._add_phone(phones, match, person_id, country)
-            for match in re.findall(r"0\d{1,2}-\d{3}\s\d{2}\s\d{2}", visible):
-                self._add_phone(phones, self._digits_only(match), person_id, country)
+        for match in re.findall(r"07\d-\d{3}\s\d{2}\s\d{2}", visible):
+            self._add_phone(phones, self._digits_only(match), person_id)
+        for match in re.findall(r"\b07\d{8}\b", visible):
+            self._add_phone(phones, match, person_id)
+        for match in re.findall(r"0\d{1,2}-\d{3}\s\d{2}\s\d{2}", visible):
+            self._add_phone(phones, self._digits_only(match), person_id)
 
         return ", ".join(phones[:2]) if phones else None
 
@@ -213,12 +193,15 @@ class LookupService:
         return None
 
     def _fetch(self, url):
-        return self.session.get(url, headers=self.headers, timeout=8)
+        try:
+            return self.session.get(url, headers=self.headers, timeout=6)
+        except requests.RequestException:
+            return None
 
     def _search_hitta(self, query, person_id):
         url = f"https://www.hitta.se/sok?vad={urllib.parse.quote(query)}"
         resp = self._fetch(url)
-        if resp.status_code != 200:
+        if not resp or resp.status_code != 200:
             return None
 
         phones = self._extract_phones_from_html(resp.text, person_id)
@@ -234,14 +217,14 @@ class LookupService:
             return None
 
         resp = self._fetch(profile)
-        if resp.status_code != 200:
+        if not resp or resp.status_code != 200:
             return None
         return self._extract_phones_from_html(resp.text, person_id)
 
     def _search_merinfo(self, query, person_id):
         url = f"https://www.merinfo.se/search?q={urllib.parse.quote(query)}&d=p"
         resp = self._fetch(url)
-        if resp.status_code != 200:
+        if not resp or resp.status_code != 200:
             return None
 
         phones = self._extract_phones_from_html(resp.text, person_id)
@@ -254,102 +237,15 @@ class LookupService:
             return None
 
         resp = self._fetch(profile)
-        if resp.status_code != 200:
+        if not resp or resp.status_code != 200:
             return None
         return self._extract_phones_from_html(resp.text, person_id)
-
-    def _search_krak(self, query):
-        url = f"https://www.krak.dk/soeg?query={urllib.parse.quote(query)}"
-        resp = self._fetch(url)
-        if resp.status_code != 200:
-            return None
-
-        phones = self._extract_phones_from_html(resp.text, country="dk")
-        if phones:
-            return phones
-
-        soup = BeautifulSoup(resp.content, "html.parser")
-        profile = self._first_profile(
-            soup, "https://www.krak.dk", 'a[href*="/person/"], a[href*="/profil/"]'
-        )
-        if not profile:
-            return None
-
-        resp = self._fetch(profile)
-        if resp.status_code != 200:
-            return None
-        return self._extract_phones_from_html(resp.text, country="dk")
-
-    def _search_eniro(self, query, person_id):
-        url = f"https://www.eniro.se/query?search_word={urllib.parse.quote(query)}&geo_area=&company_filter=&person_filter=on"
-        resp = self._fetch(url)
-        if resp.status_code != 200:
-            return None
-
-        phones = self._extract_phones_from_html(resp.text, person_id)
-        if phones:
-            return phones
-
-        soup = BeautifulSoup(resp.content, "html.parser")
-        profile = self._first_profile(
-            soup, "https://www.eniro.se", 'a[href*="/person/"], a[href*="/persons/"]'
-        )
-        if not profile:
-            return None
-
-        resp = self._fetch(profile)
-        if resp.status_code != 200:
-            return None
-        return self._extract_phones_from_html(resp.text, person_id)
-
-    def _search_merinfo_pid(self, person_id):
-        pid = self._digits_only(person_id)
-        if len(pid) < 10:
-            return None
-        if len(pid) == 10:
-            year = int(pid[:2])
-            pid = ("20" if year < 25 else "19") + pid
-        url = f"https://www.merinfo.se/person/{pid}"
-        resp = self._fetch(url)
-        if resp.status_code != 200:
-            return None
-        return self._extract_phones_from_html(resp.text, person_id)
-
-    def _merge_phone_hits(self, hits):
-        if not hits:
-            return None
-        unique = []
-        for hit in hits:
-            for part in hit.split(","):
-                part = part.strip()
-                if part and part not in unique:
-                    unique.append(part)
-        if not unique:
-            return None
-        if len(unique) == 1:
-            return unique[0]
-        return f"{unique[0]}, {unique[1]}"
 
     def _search_sweden(self, query, person_id):
-        tasks = {
-            "hitta": lambda: self._search_hitta(query, person_id),
-            "merinfo": lambda: self._search_merinfo(query, person_id),
-            "eniro": lambda: self._search_eniro(query, person_id),
-        }
-        if person_id and self._digits_only(person_id):
-            tasks["merinfo_pid"] = lambda: self._search_merinfo_pid(person_id)
-
-        hits = []
-        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-            futures = {pool.submit(fn): name for name, fn in tasks.items()}
-            for future in as_completed(futures):
-                try:
-                    phone = future.result()
-                    if phone:
-                        hits.append(phone)
-                except Exception:
-                    continue
-        return self._merge_phone_hits(hits)
+        result = self._search_hitta(query, person_id)
+        if result:
+            return result
+        return self._search_merinfo(query, person_id)
 
     def find_phone_number(self, person_id, name):
         name_clean = str(name).strip()
@@ -360,13 +256,11 @@ class LookupService:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        query, _ = self.parse_search_query(name_clean)
-        pid = str(person_id).strip()
-
         if self._is_danish(name_clean):
-            result = self._search_krak(query) or "Ej hittat (Danmark)"
+            result = "Ej hittat (Danmark)"
         else:
-            result = self._search_sweden(query, pid) or "Ej hittat"
+            query, _ = self.parse_search_query(name_clean)
+            result = self._search_sweden(query, str(person_id).strip()) or "Ej hittat"
 
         self._cache[cache_key] = result
         return result
